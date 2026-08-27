@@ -16,8 +16,8 @@ MODES = {
     "coding": "Act as a senior software engineer. Diagnose bugs, explain root causes, and provide implementation-ready fixes.",
     "business": "Act as a pragmatic business strategist. Focus on ROI, feasibility, risks, and concrete next steps.",
     "marketing": "Act as a performance marketing expert. Focus on audience, positioning, conversion, testing, and measurable actions.",
-    "math": "Act as a meticulous mathematician. Show the necessary reasoning, calculations, assumptions, and verify the result.",
-    "research": "Act as a research analyst. Separate facts from assumptions, identify uncertainty, and structure the answer logically.",
+    "math": "Act as a meticulous mathematician. Show necessary reasoning and verify calculations.",
+    "research": "Act as a research analyst. Produce a structured research brief, clearly separate established facts from assumptions, identify uncertainty, and recommend what evidence should be checked.",
     "writing": "Act as an expert editor and writing coach. Diagnose the writing problem and give a strong, usable solution.",
     "troubleshooting": "Act as a technical troubleshooter. Prioritize likely root causes, diagnostic checks, and fixes from safest to most invasive.",
 }
@@ -36,12 +36,14 @@ def client_for(provider_name, api_key):
     return OpenAI(**kwargs)
 
 
-def solve_one(problem, provider_name, api_key, model, mode="general"):
+def solve_one(problem, provider_name, api_key, model, mode="general", context=""):
     provider = PROVIDERS[provider_name]
     key = (api_key or "").strip() or os.getenv(provider["env_key"], "").strip()
     if not key:
         raise ValueError(f"No API key configured for {provider['name']}.")
     prompt = f"{BASE_PROMPT}\n\nMode: {MODES.get(mode, MODES['general'])}"
+    if context:
+        prompt += "\n\nResearch context provided by the application. Use it as evidence, do not invent citations:\n" + context
     response = client_for(provider_name, key).chat.completions.create(
         model=model or provider["default_model"],
         messages=[{"role": "system", "content": prompt}, {"role": "user", "content": problem}],
@@ -68,17 +70,35 @@ def solve():
     provider = PROVIDERS.get(provider_name)
     if not provider:
         return jsonify({"error": "Unsupported provider."}), 400
-    if not problem:
-        return jsonify({"error": "Please describe a problem first."}), 400
-    if len(problem) > 12000:
-        return jsonify({"error": "Problem description is too long (12,000 character limit)."}), 400
+    if not problem or len(problem) > 12000:
+        return jsonify({"error": "Enter a problem between 1 and 12,000 characters."}), 400
     model = (data.get("model") or provider["default_model"]).strip()
     try:
-        answer = solve_one(problem, provider_name, data.get("api_key"), model, data.get("mode", "general"))
+        answer = solve_one(problem, provider_name, data.get("api_key"), model, data.get("mode", "general"), data.get("research_context", ""))
         return jsonify({"answer": answer, "provider": provider_name, "model": model})
     except Exception as exc:
         app.logger.exception("AI request failed")
         return jsonify({"error": f"AI request failed: {exc}"}), 502
+
+
+@app.post("/api/research")
+def research():
+    """Research mode uses a user-configured OpenAI-compatible provider to synthesize a research brief.
+    The server does not scrape arbitrary sites; the UI can provide retrieved source text/URLs from a search integration later.
+    """
+    data = request.get_json(silent=True) or {}
+    problem = (data.get("problem") or "").strip()
+    provider_name = (data.get("provider") or "openai").lower()
+    provider = PROVIDERS.get(provider_name)
+    if not provider or not problem or len(problem) > 12000:
+        return jsonify({"error": "Choose a valid provider and enter a problem between 1 and 12,000 characters."}), 400
+    model = (data.get("model") or provider["default_model"]).strip()
+    try:
+        answer = solve_one(problem, provider_name, data.get("api_key"), model, "research", data.get("research_context", ""))
+        return jsonify({"answer": answer, "provider": provider_name, "model": model, "sources": data.get("sources", [])})
+    except Exception as exc:
+        app.logger.exception("Research request failed")
+        return jsonify({"error": f"Research request failed: {exc}"}), 502
 
 
 @app.post("/api/compare")
@@ -91,7 +111,6 @@ def compare():
     requested = data.get("providers") or []
     if not isinstance(requested, list) or not requested:
         return jsonify({"error": "Select at least one provider."}), 400
-
     jobs = []
     for item in requested[:3]:
         if not isinstance(item, dict):
@@ -102,21 +121,18 @@ def compare():
         jobs.append((name, item.get("api_key", ""), (item.get("model") or PROVIDERS[name]["default_model"]).strip()))
     if not jobs:
         return jsonify({"error": "No valid providers selected."}), 400
-
     results = []
     with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-        futures = {executor.submit(solve_one, problem, p, k, m, mode): (p, m) for p, k, m in jobs}
+        futures = {executor.submit(solve_one, problem, p, k, m, mode, data.get("research_context", "")): (p, m) for p, k, m in jobs}
         for future in as_completed(futures):
             p, m = futures[future]
             try:
                 results.append({"provider": p, "model": m, "answer": future.result()})
             except Exception as exc:
                 results.append({"provider": p, "model": m, "error": str(exc)})
-
     successful = [r for r in results if "answer" in r]
     if not successful:
         return jsonify({"error": "All selected providers failed.", "results": results}), 502
-
     judge = None
     judge_provider = data.get("judge_provider", "")
     judge_key = data.get("judge_api_key", "")
@@ -128,15 +144,10 @@ Choose the most accurate and actionable ideas, correct weak points, and produce 
 
 PROBLEM:\n{problem}\n\nCANDIDATES:\n{combined}"""
         try:
-            response = client_for(judge_provider, judge_key).chat.completions.create(
-                model=judge_model or PROVIDERS[judge_provider]["default_model"],
-                messages=[{"role": "system", "content": "Be a rigorous solution evaluator and synthesizer."}, {"role": "user", "content": judge_prompt}],
-                temperature=0.2,
-            )
+            response = client_for(judge_provider, judge_key).chat.completions.create(model=judge_model or PROVIDERS[judge_provider]["default_model"], messages=[{"role": "system", "content": "Be a rigorous solution evaluator and synthesizer."}, {"role": "user", "content": judge_prompt}], temperature=0.2)
             judge = {"provider": judge_provider, "model": judge_model or PROVIDERS[judge_provider]["default_model"], "answer": response.choices[0].message.content}
         except Exception as exc:
             judge = {"error": str(exc)}
-
     return jsonify({"results": results, "judge": judge})
 
 
