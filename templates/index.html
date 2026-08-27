@@ -1,8 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Problem Solver</title>
   <meta name="description" content="Describe a problem and get a practical AI-powered solution.">
   <link rel="stylesheet" href="/static/style.css">
@@ -10,65 +9,70 @@
 <body>
   <main class="shell">
     <header>
-      <div class="badge">AI PROBLEM SOLVER</div>
+      <div class="topbar"><div class="badge">AI PROBLEM SOLVER</div><button id="settingsBtn" class="icon-btn" type="button">⚙ Settings</button></div>
       <h1>Turn problems into <span>solutions.</span></h1>
       <p class="subtitle">Describe what's going wrong. Get a clear, practical plan to move forward.</p>
     </header>
 
     <section class="card">
+      <div class="provider-row">
+        <div><label for="provider">AI provider</label><select id="provider"><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="nvidia">NVIDIA NIM</option></select></div>
+        <div><label for="model">Model</label><input id="model" type="text" placeholder="Provider default"></div>
+      </div>
       <label for="problem">What problem are you trying to solve?</label>
       <textarea id="problem" maxlength="12000" placeholder="Example: My website is getting traffic but almost no one is signing up. What should I check first?"></textarea>
-      <div class="controls">
-        <span id="count">0 / 12,000</span>
-        <button id="solve" type="button">Solve problem <span>→</span></button>
-      </div>
+      <div class="controls"><span id="count">0 / 12,000</span><button id="solve" type="button">Solve problem <span>→</span></button></div>
     </section>
 
-    <section id="result" class="card result hidden">
-      <div class="result-head"><h2>Solution</h2><button id="copy" type="button">Copy</button></div>
-      <div id="answer" class="answer"></div>
-    </section>
-
+    <section id="result" class="card result hidden"><div class="result-head"><h2>Solution</h2><button id="copy" type="button">Copy</button></div><div id="answer" class="answer"></div><div id="meta" class="meta"></div></section>
     <p id="status" class="status"></p>
   </main>
-  <script>
-    const problem = document.getElementById('problem');
-    const count = document.getElementById('count');
-    const solve = document.getElementById('solve');
-    const result = document.getElementById('result');
-    const answer = document.getElementById('answer');
-    const status = document.getElementById('status');
-    const copy = document.getElementById('copy');
 
-    problem.addEventListener('input', () => count.textContent = `${problem.value.length.toLocaleString()} / 12,000`);
+  <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-card">
+      <div class="modal-head"><div><h2 id="settingsTitle">Settings</h2><p>API keys stay in this browser's local storage and are sent only when you solve a problem.</p></div><button id="closeSettings" class="close-btn" type="button">×</button></div>
+      <label for="openaiKey">OpenAI API key</label><input id="openaiKey" type="password" autocomplete="off" placeholder="sk-…">
+      <label for="openrouterKey">OpenRouter API key</label><input id="openrouterKey" type="password" autocomplete="off" placeholder="sk-or-…">
+      <label for="nvidiaKey">NVIDIA NIM API key</label><input id="nvidiaKey" type="password" autocomplete="off" placeholder="nvapi-…">
+      <div class="setting-note">🔒 Keys are stored locally in your browser. This app does not write them to GitHub or server-side storage.</div>
+      <div class="modal-actions"><button id="clearKeys" class="secondary" type="button">Clear saved keys</button><button id="saveSettings" type="button">Save settings</button></div>
+    </div>
+  </div>
 
-    solve.addEventListener('click', async () => {
-      const text = problem.value.trim();
-      if (!text) { status.textContent = 'Describe a problem first.'; return; }
-      solve.disabled = true;
-      solve.innerHTML = 'Thinking <span>…</span>';
-      status.textContent = '';
-      result.classList.add('hidden');
-      try {
-        const res = await fetch('/api/solve', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({problem:text})});
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Something went wrong.');
-        answer.textContent = data.answer;
-        result.classList.remove('hidden');
-        result.scrollIntoView({behavior:'smooth', block:'start'});
-      } catch (e) { status.textContent = e.message; }
-      finally { solve.disabled = false; solve.innerHTML = 'Solve problem <span>→</span>'; }
-    });
+<script>
+const $ = id => document.getElementById(id);
+const problem=$('problem'), count=$('count'), solve=$('solve'), result=$('result'), answer=$('answer'), status=$('status'), copy=$('copy');
+const provider=$('provider'), model=$('model'), modal=$('settingsModal');
+const defaults={openai:'gpt-4o-mini',openrouter:'openai/gpt-4o-mini',nvidia:'meta/llama-3.1-8b-instruct'};
+const keyNames={openai:'openaiKey',openrouter:'openrouterKey',nvidia:'nvidiaKey'};
 
-    copy.addEventListener('click', async () => {
-      await navigator.clipboard.writeText(answer.textContent);
-      copy.textContent = 'Copied!';
-      setTimeout(() => copy.textContent = 'Copy', 1200);
-    });
+function loadSettings(){
+  ['openai','openrouter','nvidia'].forEach(p=>$(keyNames[p]).value=localStorage.getItem('aps_'+p+'_key')||'');
+}
+function openSettings(){loadSettings(); modal.classList.remove('hidden');}
+function closeSettings(){modal.classList.add('hidden');}
+function currentKey(){return localStorage.getItem('aps_'+provider.value+'_key')||'';}
+function updateModel(){model.placeholder=defaults[provider.value]||'Provider default'; if(!model.value) model.value=defaults[provider.value]||'';}
 
-    problem.addEventListener('keydown', e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') solve.click();
-    });
-  </script>
-</body>
-</html>
+$('settingsBtn').onclick=openSettings; $('closeSettings').onclick=closeSettings;
+modal.onclick=e=>{if(e.target===modal)closeSettings()};
+$('saveSettings').onclick=()=>{['openai','openrouter','nvidia'].forEach(p=>localStorage.setItem('aps_'+p+'_key',$('#'+keyNames[p]).value.trim())); closeSettings(); status.textContent='Settings saved locally.'; setTimeout(()=>status.textContent='',1800);};
+$('clearKeys').onclick=()=>{['openai','openrouter','nvidia'].forEach(p=>{localStorage.removeItem('aps_'+p+'_key');$(keyNames[p]).value='';}); status.textContent='Saved API keys cleared.';};
+provider.onchange=()=>{model.value='';updateModel();};
+problem.addEventListener('input',()=>count.textContent=`${problem.value.length.toLocaleString()} / 12,000`);
+updateModel();
+
+solve.onclick=async()=>{
+  const text=problem.value.trim(); if(!text){status.textContent='Describe a problem first.';return;}
+  solve.disabled=true; solve.innerHTML='Thinking <span>…</span>'; status.textContent=''; result.classList.add('hidden');
+  try{
+    const res=await fetch('/api/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem:text,provider:provider.value,model:model.value.trim(),api_key:currentKey()})});
+    const data=await res.json(); if(!res.ok) throw new Error(data.error||'Something went wrong.');
+    answer.textContent=data.answer; $('meta').textContent=`${data.provider} • ${data.model}`; result.classList.remove('hidden'); result.scrollIntoView({behavior:'smooth',block:'start'});
+  }catch(e){status.textContent=e.message;} finally{solve.disabled=false;solve.innerHTML='Solve problem <span>→</span>';}
+};
+copy.onclick=async()=>{await navigator.clipboard.writeText(answer.textContent);copy.textContent='Copied!';setTimeout(()=>copy.textContent='Copy',1200);};
+problem.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')solve.click();});
+window.addEventListener('keydown',e=>{if(e.key==='Escape')closeSettings();});
+</script>
+</body></html>
