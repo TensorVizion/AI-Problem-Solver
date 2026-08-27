@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Problem Solver</title>
+  <meta name="description" content="Describe a problem and get a practical AI-powered solution.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="badge">AI PROBLEM SOLVER</div>
+      <h1>Turn problems into <span>solutions.</span></h1>
+      <p class="subtitle">Describe what's going wrong. Get a clear, practical plan to move forward.</p>
+    </header>
+
+    <section class="card">
+      <label for="problem">What problem are you trying to solve?</label>
+      <textarea id="problem" maxlength="12000" placeholder="Example: My website is getting traffic but almost no one is signing up. What should I check first?"></textarea>
+      <div class="controls">
+        <span id="count">0 / 12,000</span>
+        <button id="solve" type="button">Solve problem <span>→</span></button>
+      </div>
+    </section>
+
+    <section id="result" class="card result hidden">
+      <div class="result-head"><h2>Solution</h2><button id="copy" type="button">Copy</button></div>
+      <div id="answer" class="answer"></div>
+    </section>
+
+    <p id="status" class="status"></p>
+  </main>
+  <script>
+    const problem = document.getElementById('problem');
+    const count = document.getElementById('count');
+    const solve = document.getElementById('solve');
+    const result = document.getElementById('result');
+    const answer = document.getElementById('answer');
+    const status = document.getElementById('status');
+    const copy = document.getElementById('copy');
+
+    problem.addEventListener('input', () => count.textContent = `${problem.value.length.toLocaleString()} / 12,000`);
+
+    solve.addEventListener('click', async () => {
+      const text = problem.value.trim();
+      if (!text) { status.textContent = 'Describe a problem first.'; return; }
+      solve.disabled = true;
+      solve.innerHTML = 'Thinking <span>…</span>';
+      status.textContent = '';
+      result.classList.add('hidden');
+      try {
+        const res = await fetch('/api/solve', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({problem:text})});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+        answer.textContent = data.answer;
+        result.classList.remove('hidden');
+        result.scrollIntoView({behavior:'smooth', block:'start'});
+      } catch (e) { status.textContent = e.message; }
+      finally { solve.disabled = false; solve.innerHTML = 'Solve problem <span>→</span>'; }
+    });
+
+    copy.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(answer.textContent);
+      copy.textContent = 'Copied!';
+      setTimeout(() => copy.textContent = 'Copy', 1200);
+    });
+
+    problem.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') solve.click();
+    });
+  </script>
+</body>
+</html>
