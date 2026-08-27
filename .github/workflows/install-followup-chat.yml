@@ -1,0 +1,30 @@
+name: Install follow-up chat
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  install-chat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install patch
+        run: python tools/add_followup_chat.py
+
+      - name: Commit feature
+        run: |
+          if git diff --quiet; then
+            echo "Follow-up chat is already installed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py templates/index.html static/chat.js
+          git commit -m "Add conversational follow-up chat"
+          git push
