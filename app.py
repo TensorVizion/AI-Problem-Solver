@@ -1,27 +1,29 @@
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote_plus, urljoin
+
+import requests
+from bs4 import BeautifulSoup
 from flask import Flask, render_template, request, jsonify
 from openai import OpenAI
 
 app = Flask(__name__)
-
 PROVIDERS = {
     "openai": {"name": "OpenAI", "base_url": None, "env_key": "OPENAI_API_KEY", "default_model": os.getenv("OPENAI_MODEL", "gpt-4o-mini")},
     "openrouter": {"name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "env_key": "OPENROUTER_API_KEY", "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")},
     "nvidia": {"name": "NVIDIA NIM", "base_url": "https://integrate.api.nvidia.com/v1", "env_key": "NVIDIA_NIM_API_KEY", "default_model": os.getenv("NVIDIA_NIM_MODEL", "meta/llama-3.1-8b-instruct")},
 }
-
 MODES = {
     "general": "Solve the problem practically and clearly.",
     "coding": "Act as a senior software engineer. Diagnose bugs, explain root causes, and provide implementation-ready fixes.",
     "business": "Act as a pragmatic business strategist. Focus on ROI, feasibility, risks, and concrete next steps.",
     "marketing": "Act as a performance marketing expert. Focus on audience, positioning, conversion, testing, and measurable actions.",
     "math": "Act as a meticulous mathematician. Show necessary reasoning and verify calculations.",
-    "research": "Act as a research analyst. Produce a structured research brief, clearly separate established facts from assumptions, identify uncertainty, and recommend what evidence should be checked.",
+    "research": "Act as a research analyst. Build conclusions from supplied sources, distinguish facts from inference, and identify uncertainty.",
     "writing": "Act as an expert editor and writing coach. Diagnose the writing problem and give a strong, usable solution.",
     "troubleshooting": "Act as a technical troubleshooter. Prioritize likely root causes, diagnostic checks, and fixes from safest to most invasive.",
 }
-
 BASE_PROMPT = """You are AI Problem Solver, a practical assistant that helps users solve real-world problems.
 Analyze the user's problem, identify the key issue, give a clear recommended solution, and provide actionable steps.
 When useful, include assumptions, alternatives, tradeoffs, examples, and a concise checklist.
@@ -43,7 +45,7 @@ def solve_one(problem, provider_name, api_key, model, mode="general", context=""
         raise ValueError(f"No API key configured for {provider['name']}.")
     prompt = f"{BASE_PROMPT}\n\nMode: {MODES.get(mode, MODES['general'])}"
     if context:
-        prompt += "\n\nResearch context provided by the application. Use it as evidence, do not invent citations:\n" + context
+        prompt += "\n\nResearch sources/context. Treat these as source material and cite source numbers where relevant:\n" + context
     response = client_for(provider_name, key).chat.completions.create(
         model=model or provider["default_model"],
         messages=[{"role": "system", "content": prompt}, {"role": "user", "content": problem}],
@@ -52,27 +54,66 @@ def solve_one(problem, provider_name, api_key, model, mode="general", context=""
     return response.choices[0].message.content or "No solution was returned."
 
 
+def web_research(query, max_sources=5):
+    """Lightweight public web research using DuckDuckGo's HTML results, then extracts readable page text.
+    This is deliberately limited to a small number of pages and short excerpts to control latency/context size.
+    """
+    headers = {"User-Agent": "AI-Problem-Solver/1.0 (+https://github.com/TensorVizion/AI-Problem-Solver)"}
+    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query)
+    r = requests.get(search_url, headers=headers, timeout=10)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    candidates = []
+    for result in soup.select(".result"):
+        a = result.select_one(".result__a")
+        snippet = result.select_one(".result__snippet")
+        if not a or not a.get("href"):
+            continue
+        href = a["href"]
+        if href.startswith("//"):
+            href = "https:" + href
+        candidates.append({"title": a.get_text(" ", strip=True), "url": href, "snippet": snippet.get_text(" ", strip=True) if snippet else ""})
+        if len(candidates) >= max_sources:
+            break
+
+    sources = []
+    for item in candidates:
+        try:
+            page = requests.get(item["url"], headers=headers, timeout=8, allow_redirects=True)
+            if "text/html" not in page.headers.get("content-type", ""):
+                text = item["snippet"]
+            else:
+                psoup = BeautifulSoup(page.text, "html.parser")
+                for tag in psoup(["script", "style", "noscript", "svg", "nav", "footer"]):
+                    tag.decompose()
+                text = " ".join(psoup.stripped_strings)
+                text = re.sub(r"\s+", " ", text)[:5000]
+            sources.append({"title": item["title"], "url": page.url if 'page' in locals() else item["url"], "snippet": item["snippet"], "content": text})
+        except Exception:
+            sources.append(item | {"content": item["snippet"]})
+    return sources
+
+
+def format_sources(sources):
+    return "\n\n".join(f"[Source {i}] {s['title']}\nURL: {s['url']}\nExcerpt: {s['content']}" for i, s in enumerate(sources, 1))
+
+
 @app.get("/")
 def index():
     return render_template("index.html", providers=PROVIDERS, modes=MODES)
 
-
 @app.get("/api/providers")
 def providers():
     return jsonify({k: {"name": v["name"], "default_model": v["default_model"]} for k, v in PROVIDERS.items()})
-
 
 @app.post("/api/solve")
 def solve():
     data = request.get_json(silent=True) or {}
     problem = (data.get("problem") or "").strip()
     provider_name = (data.get("provider") or "openai").lower()
-    provider = PROVIDERS.get(provider_name)
-    if not provider:
-        return jsonify({"error": "Unsupported provider."}), 400
-    if not problem or len(problem) > 12000:
-        return jsonify({"error": "Enter a problem between 1 and 12,000 characters."}), 400
-    model = (data.get("model") or provider["default_model"]).strip()
+    if provider_name not in PROVIDERS or not problem or len(problem) > 12000:
+        return jsonify({"error": "Choose a valid provider and enter a problem between 1 and 12,000 characters."}), 400
+    model = (data.get("model") or PROVIDERS[provider_name]["default_model"]).strip()
     try:
         answer = solve_one(problem, provider_name, data.get("api_key"), model, data.get("mode", "general"), data.get("research_context", ""))
         return jsonify({"answer": answer, "provider": provider_name, "model": model})
@@ -80,26 +121,25 @@ def solve():
         app.logger.exception("AI request failed")
         return jsonify({"error": f"AI request failed: {exc}"}), 502
 
-
 @app.post("/api/research")
 def research():
-    """Research mode uses a user-configured OpenAI-compatible provider to synthesize a research brief.
-    The server does not scrape arbitrary sites; the UI can provide retrieved source text/URLs from a search integration later.
-    """
     data = request.get_json(silent=True) or {}
     problem = (data.get("problem") or "").strip()
     provider_name = (data.get("provider") or "openai").lower()
-    provider = PROVIDERS.get(provider_name)
-    if not provider or not problem or len(problem) > 12000:
+    if provider_name not in PROVIDERS or not problem or len(problem) > 12000:
         return jsonify({"error": "Choose a valid provider and enter a problem between 1 and 12,000 characters."}), 400
-    model = (data.get("model") or provider["default_model"]).strip()
+    model = (data.get("model") or PROVIDERS[provider_name]["default_model"]).strip()
     try:
-        answer = solve_one(problem, provider_name, data.get("api_key"), model, "research", data.get("research_context", ""))
-        return jsonify({"answer": answer, "provider": provider_name, "model": model, "sources": data.get("sources", [])})
+        sources = web_research(problem, max_sources=5)
+        context = format_sources(sources)
+        extra = (data.get("research_context") or "").strip()
+        if extra:
+            context += "\n\n[User-provided research context]\n" + extra[:20000]
+        answer = solve_one(problem, provider_name, data.get("api_key"), model, "research", context)
+        return jsonify({"answer": answer, "provider": provider_name, "model": model, "sources": [{"title": s["title"], "url": s["url"], "snippet": s.get("snippet", "")} for s in sources]})
     except Exception as exc:
         app.logger.exception("Research request failed")
         return jsonify({"error": f"Research request failed: {exc}"}), 502
-
 
 @app.post("/api/compare")
 def compare():
@@ -107,49 +147,33 @@ def compare():
     problem = (data.get("problem") or "").strip()
     if not problem or len(problem) > 12000:
         return jsonify({"error": "Enter a problem between 1 and 12,000 characters."}), 400
-    mode = data.get("mode", "general")
     requested = data.get("providers") or []
     if not isinstance(requested, list) or not requested:
         return jsonify({"error": "Select at least one provider."}), 400
     jobs = []
     for item in requested[:3]:
-        if not isinstance(item, dict):
-            continue
+        if not isinstance(item, dict): continue
         name = str(item.get("provider", "")).lower()
-        if name not in PROVIDERS:
-            continue
-        jobs.append((name, item.get("api_key", ""), (item.get("model") or PROVIDERS[name]["default_model"]).strip()))
-    if not jobs:
-        return jsonify({"error": "No valid providers selected."}), 400
-    results = []
+        if name in PROVIDERS:
+            jobs.append((name, item.get("api_key", ""), (item.get("model") or PROVIDERS[name]["default_model"]).strip()))
+    if not jobs: return jsonify({"error": "No valid providers selected."}), 400
+    results=[]
     with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-        futures = {executor.submit(solve_one, problem, p, k, m, mode, data.get("research_context", "")): (p, m) for p, k, m in jobs}
+        futures={executor.submit(solve_one, problem,p,k,m,data.get("mode","general"),data.get("research_context","")):(p,m) for p,k,m in jobs}
         for future in as_completed(futures):
-            p, m = futures[future]
-            try:
-                results.append({"provider": p, "model": m, "answer": future.result()})
-            except Exception as exc:
-                results.append({"provider": p, "model": m, "error": str(exc)})
-    successful = [r for r in results if "answer" in r]
-    if not successful:
-        return jsonify({"error": "All selected providers failed.", "results": results}), 502
-    judge = None
-    judge_provider = data.get("judge_provider", "")
-    judge_key = data.get("judge_api_key", "")
-    judge_model = data.get("judge_model", "")
-    if judge_provider in PROVIDERS and (judge_key or os.getenv(PROVIDERS[judge_provider]["env_key"])):
-        combined = "\n\n".join(f"--- {r['provider']} / {r['model']} ---\n{r['answer']}" for r in successful)
-        judge_prompt = f"""You are the final AI judge for AI Problem Solver. Compare the candidate solutions below for the user's problem.
-Choose the most accurate and actionable ideas, correct weak points, and produce one superior final solution. Do not mention internal judging.
-
-PROBLEM:\n{problem}\n\nCANDIDATES:\n{combined}"""
+            p,m=futures[future]
+            try: results.append({"provider":p,"model":m,"answer":future.result()})
+            except Exception as exc: results.append({"provider":p,"model":m,"error":str(exc)})
+    successful=[r for r in results if "answer" in r]
+    if not successful: return jsonify({"error":"All selected providers failed.","results":results}),502
+    judge=None; jp=data.get("judge_provider",""); jk=data.get("judge_api_key",""); jm=data.get("judge_model","")
+    if jp in PROVIDERS and (jk or os.getenv(PROVIDERS[jp]["env_key"])):
+        combined="\n\n".join(f"--- {r['provider']} / {r['model']} ---\n{r['answer']}" for r in successful)
         try:
-            response = client_for(judge_provider, judge_key).chat.completions.create(model=judge_model or PROVIDERS[judge_provider]["default_model"], messages=[{"role": "system", "content": "Be a rigorous solution evaluator and synthesizer."}, {"role": "user", "content": judge_prompt}], temperature=0.2)
-            judge = {"provider": judge_provider, "model": judge_model or PROVIDERS[judge_provider]["default_model"], "answer": response.choices[0].message.content}
-        except Exception as exc:
-            judge = {"error": str(exc)}
-    return jsonify({"results": results, "judge": judge})
-
+            response=client_for(jp,jk).chat.completions.create(model=jm or PROVIDERS[jp]["default_model"],messages=[{"role":"system","content":"Be a rigorous solution evaluator and synthesizer."},{"role":"user","content":f"Compare these candidate solutions and produce one superior final solution.\n\nPROBLEM:\n{problem}\n\nCANDIDATES:\n{combined}"}],temperature=0.2)
+            judge={"provider":jp,"model":jm or PROVIDERS[jp]["default_model"],"answer":response.choices[0].message.content}
+        except Exception as exc: judge={"error":str(exc)}
+    return jsonify({"results":results,"judge":judge})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+    app.run(host="0.0.0.0",port=int(os.getenv("PORT","5000")),debug=False)
