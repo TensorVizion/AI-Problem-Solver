@@ -189,5 +189,34 @@ def compare():
             judge = {"error": str(exc)}
     return jsonify({"results": results, "judge": judge})
 
+
+@app.post("/api/chat")
+def chat():
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    provider_name = (data.get("provider") or "openai").lower()
+    history = data.get("history") or []
+    if provider_name not in PROVIDERS or not message or len(message) > 12000:
+        return jsonify({"error": "Choose a valid provider and enter a message between 1 and 12,000 characters."}), 400
+    if not isinstance(history, list): history = []
+    key = (data.get("api_key") or "").strip() or os.getenv(PROVIDERS[provider_name]["env_key"], "").strip()
+    if not key:
+        return jsonify({"error": f"No API key configured for {PROVIDERS[provider_name]['name']}."}), 400
+    messages = [{"role": "system", "content": BASE_PROMPT + "\nContinue the existing conversation. Answer the user's follow-up directly and preserve useful context from earlier messages."}]
+    for item in history[-10:]:
+        if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
+            content = str(item.get("content") or "").strip()
+            if content: messages.append({"role": item["role"], "content": content[:12000]})
+    messages.append({"role": "user", "content": message})
+    try:
+        provider = PROVIDERS[provider_name]
+        kwargs = {"api_key": key}
+        if provider["base_url"]: kwargs["base_url"] = provider["base_url"]
+        response = OpenAI(**kwargs).chat.completions.create(model=(data.get("model") or provider["default_model"]).strip(), messages=messages, temperature=0.4)
+        return jsonify({"answer": response.choices[0].message.content or "No response returned."})
+    except Exception:
+        app.logger.exception("Follow-up chat failed")
+        return jsonify({"error": "The follow-up request failed. Check your provider settings and try again."}), 502
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
