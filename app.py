@@ -17,7 +17,7 @@ PROVIDERS = {
 MODEL_CATALOG = {
     "openai": ["gpt-4o-mini"],
     "openrouter": ["openai/gpt-4o-mini", "openrouter/free"],
-    "nvidia": ["meta/llama-3.1-8b-instruct", "qwen/qwen3-32b", "qwen/qwen3-coder-next", "zai-org/glm-5", "minimax-ai/minimax-m25"],
+    "nvidia": ["meta/llama-3.1-8b-instruct"],
 }
 for provider_name, provider in PROVIDERS.items():
     env_name = provider["env_key"].replace("_API_KEY", "_MODELS")
@@ -54,6 +54,33 @@ def client_for(provider_name, api_key):
     if provider["base_url"]:
         kwargs["base_url"] = provider["base_url"]
     return OpenAI(**kwargs)
+
+
+def live_models(provider_name, api_key):
+    """Return models advertised by a provider's OpenAI-compatible /models endpoint.
+    Falls back to the curated catalog if no key is available or discovery fails.
+    """
+    provider = PROVIDERS[provider_name]
+    key = (api_key or "").strip() or os.getenv(provider["env_key"], "").strip()
+    fallback = MODEL_CATALOG[provider_name]
+    if not key:
+        return fallback, False
+    try:
+        response = client_for(provider_name, key).models.list()
+        ids = []
+        for item in response.data:
+            model_id = getattr(item, "id", None)
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        if not ids:
+            return fallback, False
+        # Keep the catalog useful in the UI: prefer text/chat-capable-looking IDs
+        # and cap the list so a provider with hundreds of models does not overwhelm it.
+        preferred = [m for m in ids if not any(x in m.lower() for x in ("embed", "whisper", "tts", "moderation", "image", "audio"))]
+        return (preferred or ids)[:100], True
+    except Exception:
+        app.logger.warning("Live model discovery failed for %s", provider_name, exc_info=True)
+        return fallback, False
 
 
 def solve_one(problem, provider_name, api_key, model, mode="general", context=""):
@@ -126,10 +153,16 @@ def models():
     provider_name = (request.args.get("provider") or "openai").lower()
     if provider_name not in PROVIDERS:
         return jsonify({"error": "Unknown provider."}), 400
+    supplied_key = request.headers.get("X-Provider-API-Key", "")
+    models, live = live_models(provider_name, supplied_key)
+    default_model = PROVIDERS[provider_name]["default_model"]
+    if default_model not in models:
+        models = [default_model] + models
     return jsonify({
         "provider": provider_name,
-        "default_model": PROVIDERS[provider_name]["default_model"],
-        "models": [{"id": model, "label": model} for model in MODEL_CATALOG[provider_name]],
+        "default_model": default_model,
+        "live": live,
+        "models": [{"id": model, "label": model} for model in models],
     })
 
 @app.post("/api/solve")
@@ -143,9 +176,9 @@ def solve():
     try:
         answer = solve_one(problem, provider_name, data.get("api_key"), model, data.get("mode", "general"), data.get("research_context", ""))
         return jsonify({"answer": answer, "provider": provider_name, "model": model})
-    except Exception as exc:
+    except Exception:
         app.logger.exception("AI request failed")
-        return jsonify({"error": f"AI request failed: {exc}"}), 502
+        return jsonify({"error": "AI request failed. Check the selected provider, model, and API key."}), 502
 
 @app.post("/api/research")
 def research():
@@ -163,7 +196,7 @@ def research():
             context += "\n\n[User-provided research context]\n" + extra[:20000]
         answer = solve_one(problem, provider_name, data.get("api_key"), model, "research", context)
         return jsonify({"answer": answer, "provider": provider_name, "model": model, "sources": [{"title": s["title"], "url": s["url"], "snippet": s.get("snippet", "")} for s in sources]})
-    except Exception as exc:
+    except Exception:
         app.logger.exception("Research request failed")
         return jsonify({"error": "Research request failed. Check your API key and research query, then try again."}), 502
 
@@ -209,7 +242,6 @@ def compare():
         except Exception as exc:
             judge = {"error": str(exc)}
     return jsonify({"results": results, "judge": judge})
-
 
 @app.post("/api/chat")
 def chat():
