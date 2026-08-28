@@ -2,9 +2,63 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const result = $('result');
-  if (!result || $('followupChat')) return;
+  if (!result) return;
   const key = provider => provider ? (localStorage.getItem('aps_' + provider + '_key') || '') : '';
   let history = [];
+
+  // Provider-aware model selector. The main page can keep its existing model
+  // element; this script upgrades it to a dropdown and loads /api/models.
+  const providerSelect = $('provider');
+  const modelField = $('model');
+  let modelRequest = 0;
+  async function loadModels(preserve = true) {
+    if (!providerSelect || !modelField) return;
+    const provider = providerSelect.value;
+    const previous = preserve ? modelField.value : '';
+    modelField.disabled = true;
+    modelField.innerHTML = '<option value="">Loading models…</option>';
+    try {
+      const response = await fetch('/api/models?provider=' + encodeURIComponent(provider), { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load models.');
+      modelField.innerHTML = '';
+      (data.models || []).forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.label || model.id;
+        modelField.appendChild(option);
+      });
+      const available = (data.models || []).map(m => m.id);
+      modelField.value = available.includes(previous) ? previous : (data.default_model || available[0] || '');
+      modelField.dataset.custom = 'false';
+    } catch (error) {
+      // Preserve a usable fallback if the catalog endpoint is unavailable.
+      modelField.innerHTML = '';
+      const option = document.createElement('option');
+      option.value = previous;
+      option.textContent = previous || 'Provider default';
+      modelField.appendChild(option);
+      modelField.value = previous;
+      modelField.disabled = false;
+      modelField.title = 'Model catalog unavailable; using provider default.';
+      return;
+    }
+    modelField.disabled = false;
+    modelField.title = '';
+  }
+  if (modelField && modelField.tagName === 'INPUT') {
+    const select = document.createElement('select');
+    select.id = modelField.id;
+    select.name = modelField.name;
+    select.className = modelField.className;
+    select.setAttribute('aria-label', 'AI model');
+    modelField.replaceWith(select);
+  }
+  const upgradedModelField = $('model');
+  if (providerSelect && upgradedModelField) {
+    providerSelect.addEventListener('change', () => loadModels(false));
+    loadModels(false);
+  }
 
   const style = document.createElement('style');
   style.textContent = `.chat-card{margin-top:22px}.chat-log{max-height:460px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-bottom:14px}.chat-msg{padding:13px 15px;border:1px solid #27272a;border-radius:14px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.chat-msg.user{background:#18181b}.chat-msg.assistant{background:#0d0d0f}.chat-role{display:block;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#a1a1aa;margin-bottom:5px}.chat-compose{display:flex;gap:10px;align-items:flex-end}.chat-compose textarea{min-height:90px;flex:1}.chat-compose button{white-space:nowrap}.chat-status{min-height:20px;margin-top:8px;color:#f87171;font-size:12px}@media(max-width:600px){.chat-compose{flex-direction:column;align-items:stretch}.chat-compose button{width:100%}}`;
@@ -52,7 +106,7 @@
     const message = input.value.trim();
     if (!message) return;
     const provider = $('provider')?.value || 'openai';
-    const model = $('model')?.value.trim() || '';
+    const model = $('model')?.value || '';
     const send = $('chatSend');
     addMessage('user', message);
     input.value = '';
