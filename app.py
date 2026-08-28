@@ -14,6 +14,16 @@ PROVIDERS = {
     "openrouter": {"name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "env_key": "OPENROUTER_API_KEY", "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")},
     "nvidia": {"name": "NVIDIA NIM", "base_url": "https://integrate.api.nvidia.com/v1", "env_key": "NVIDIA_NIM_API_KEY", "default_model": os.getenv("NVIDIA_NIM_MODEL", "meta/llama-3.1-8b-instruct")},
 }
+MODEL_CATALOG = {
+    "openai": ["gpt-4o-mini"],
+    "openrouter": ["openai/gpt-4o-mini", "openrouter/free"],
+    "nvidia": ["meta/llama-3.1-8b-instruct", "qwen/qwen3-32b", "qwen/qwen3-coder-next", "zai-org/glm-5", "minimax-ai/minimax-m25"],
+}
+for provider_name, provider in PROVIDERS.items():
+    env_name = provider["env_key"].replace("_API_KEY", "_MODELS")
+    configured = [m.strip() for m in os.getenv(env_name, "").split(",") if m.strip()]
+    MODEL_CATALOG[provider_name] = list(dict.fromkeys([provider["default_model"]] + configured + MODEL_CATALOG.get(provider_name, [])))
+
 MODES = {
     "general": "Solve the problem practically and clearly.",
     "coding": "Act as a senior software engineer. Diagnose the issue, identify the root cause, propose an implementation-ready fix, and include code and verification steps when useful.",
@@ -110,6 +120,17 @@ def index():
 @app.get("/api/providers")
 def providers():
     return jsonify({k: {"name": v["name"], "default_model": v["default_model"]} for k, v in PROVIDERS.items()})
+
+@app.get("/api/models")
+def models():
+    provider_name = (request.args.get("provider") or "openai").lower()
+    if provider_name not in PROVIDERS:
+        return jsonify({"error": "Unknown provider."}), 400
+    return jsonify({
+        "provider": provider_name,
+        "default_model": PROVIDERS[provider_name]["default_model"],
+        "models": [{"id": model, "label": model} for model in MODEL_CATALOG[provider_name]],
+    })
 
 @app.post("/api/solve")
 def solve():
