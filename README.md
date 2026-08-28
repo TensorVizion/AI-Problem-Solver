@@ -9,11 +9,15 @@ A lightweight multi-provider AI app that turns messy problems into practical sol
 - Browser-local API-key storage (never committed to the repo)
 - Server environment-variable fallback for hosted deployments
 - Problem modes: General, Coding, Business, Marketing, Math, Research, Writing, Troubleshooting
+- Dedicated coding workflow with diagnosis, root cause, fix, code, and verification guidance
+- Quick templates for common tasks
 - Single-model solving
 - Multi-model comparison across up to 3 providers
 - Optional final AI judge that synthesizes the strongest answer
+- Follow-up conversational chat after every solution
 - Local problem history (up to 20 items)
 - Copy solutions
+- Markdown and plain-text export
 - Responsive dark UI
 - `Ctrl/Cmd + Enter` shortcut
 - Custom model names
@@ -46,15 +50,11 @@ Optional model environment variables: `OPENAI_MODEL`, `OPENROUTER_MODEL`, `NVIDI
 
 For a personal/local deployment, browser-local keys are convenient. For a public SaaS deployment, do not collect users' API keys without a proper security architecture. Add authentication, HTTPS, rate limiting, server-side secret handling, and a clear privacy policy before production use.
 
-## Roadmap ideas
+## Architecture
 
-- Streaming responses
-- Markdown rendering
-- PDF/Markdown export
-- Shareable solution links
-- Token/cost estimates
-- User accounts and cloud history
-- Model discovery APIs
-- Solution quality scoring
-- File/image attachments
-- Web research mode
+- `app.py` — Flask API, provider integration, solving, comparison, and research
+- `templates/index.html` — application UI
+- `static/style.css` — responsive styling
+- `static/chat.js` — follow-up conversation UI
+
+Follow-up chat keeps the conversation in the browser and sends only the current conversation context with each request. No chat history is persisted on the server.
